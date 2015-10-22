@@ -10,7 +10,16 @@
      */
     function IDBObjectStore(storeProperties, transaction) {
         this.name = storeProperties.name;
-        this.keyPath = JSON.parse(storeProperties.keyPath);
+        try {
+            this.keyPath = JSON.parse(storeProperties.keyPath);
+        } catch (e) {
+            // handle old keyPaths from version 0.1.x
+            if (storeProperties.keyPath.length > 2 && storeProperties.keyPath[1] === "-") {
+                this.keyPath = storeProperties.keyPath.substring(2);
+            } else {
+                throw idbModules.util.createDOMException("InvalidKeyPathError", "Invalid keyPath value \"" + storeProperties.keyPath + "\". Are you migrating from an old version of the shim?");
+            }
+        }
         this.transaction = transaction;
 
         // autoInc is numeric (0/1) on WinPhone
