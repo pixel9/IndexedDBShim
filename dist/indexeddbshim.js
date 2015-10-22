@@ -1230,7 +1230,7 @@ var idbModules = {  // jshint ignore:line
 
     idbModules.Key = {
         encode: function(key, inArray) {
-            if (key === undefined) {
+            if (key === undefined || key === null) {
                 return null;
             }
             return types[getType(key)].encode(key, inArray);
@@ -2179,7 +2179,16 @@ var idbModules = {  // jshint ignore:line
      */
     function IDBObjectStore(storeProperties, transaction) {
         this.name = storeProperties.name;
-        this.keyPath = JSON.parse(storeProperties.keyPath);
+        try {
+            this.keyPath = JSON.parse(storeProperties.keyPath);
+        } catch (e) {
+            // handle old keyPaths from version 0.1.x
+            if (storeProperties.keyPath.length > 2 && storeProperties.keyPath[1] === "-") {
+                this.keyPath = storeProperties.keyPath.substring(2);
+            } else {
+                throw idbModules.util.createDOMException("InvalidKeyPathError", "Invalid keyPath value \"" + storeProperties.keyPath + "\". Are you migrating from an old version of the shim?");
+            }
+        }
         this.transaction = transaction;
 
         // autoInc is numeric (0/1) on WinPhone
