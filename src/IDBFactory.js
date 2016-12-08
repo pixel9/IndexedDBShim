@@ -3,6 +3,25 @@
 
     var DEFAULT_DB_SIZE = 4 * 1024 * 1024;
     var sysdb;
+    var ConnectionPool = {};
+
+    function getOpenDatabase(name, version, size, callback) {
+        size = size || DEFAULT_DB_SIZE;
+        var cacheKey = name + version;
+        var cachedDB = ConnectionPool[cacheKey];
+
+        if (!cachedDB) {
+            callback(ConnectionPool[cacheKey] = window.openDatabase(name, 1, name, size));
+        }
+        else {
+            // make sure connection is still open
+            cachedDB.transaction(function (tx) {
+                callback(cachedDB);
+            }, function () {
+                callback(ConnectionPool[cacheKey] = window.openDatabase(name, 1, name, size));
+            });
+        }        
+    }
 
     /**
      * Craetes the sysDB to keep track of version numbers for databases
@@ -67,47 +86,48 @@
         }
 
         function openDB(oldVersion) {
-            var db = window.openDatabase(name, 1, name, DEFAULT_DB_SIZE);
-            req.readyState = "done";
-            if (typeof version === "undefined") {
-                version = oldVersion || 1;
-            }
-            if (version <= 0 || oldVersion > version) {
-                var err = idbModules.util.createDOMError("VersionError", "An attempt was made to open a database using a lower version than the existing version.", version);
-                dbCreateError(err);
-                return;
-            }
+            getOpenDatabase(name, 1, DEFAULT_DB_SIZE, function (db) {
+                req.readyState = "done";
+                if (typeof version === "undefined") {
+                    version = oldVersion || 1;
+                }
+                if (version <= 0 || oldVersion > version) {
+                    var err = idbModules.util.createDOMError("VersionError", "An attempt was made to open a database using a lower version than the existing version.", version);
+                    dbCreateError(err);
+                    return;
+                }
 
-            db.transaction(function(tx) {
-                tx.executeSql("CREATE TABLE IF NOT EXISTS __sys__ (name VARCHAR(255), keyPath VARCHAR(255), autoInc BOOLEAN, indexList BLOB)", [], function() {
-                    tx.executeSql("SELECT * FROM __sys__", [], function(tx, data) {
-                        var e = idbModules.util.createEvent("success");
-                        req.source = req.result = new idbModules.IDBDatabase(db, name, version, data);
-                        if (oldVersion < version) {
-                            // DB Upgrade in progress
-                            sysdb.transaction(function(systx) {
-                                systx.executeSql("UPDATE dbVersions set version = ? where name = ?", [version, name], function() {
-                                    var e = idbModules.util.createEvent("upgradeneeded");
-                                    e.oldVersion = oldVersion;
-                                    e.newVersion = version;
-                                    req.transaction = req.result.__versionTransaction = new idbModules.IDBTransaction(req.source, [], idbModules.IDBTransaction.VERSION_CHANGE);
-                                    req.transaction.__addToTransactionQueue(function onupgradeneeded(tx, args, success) {
-                                        idbModules.util.callback("onupgradeneeded", req, e);
-                                        success();
-                                    });
-                                    req.transaction.__oncomplete = function() {
-                                        req.transaction = null;
-                                        var e = idbModules.util.createEvent("success");
-                                        idbModules.util.callback("onsuccess", req, e);
-                                    };
+                db.transaction(function(tx) {
+                    tx.executeSql("CREATE TABLE IF NOT EXISTS __sys__ (name VARCHAR(255), keyPath VARCHAR(255), autoInc BOOLEAN, indexList BLOB)", [], function() {
+                        tx.executeSql("SELECT * FROM __sys__", [], function(tx, data) {
+                            var e = idbModules.util.createEvent("success");
+                            req.source = req.result = new idbModules.IDBDatabase(db, name, version, data);
+                            if (oldVersion < version) {
+                                // DB Upgrade in progress
+                                sysdb.transaction(function(systx) {
+                                    systx.executeSql("UPDATE dbVersions set version = ? where name = ?", [version, name], function() {
+                                        var e = idbModules.util.createEvent("upgradeneeded");
+                                        e.oldVersion = oldVersion;
+                                        e.newVersion = version;
+                                        req.transaction = req.result.__versionTransaction = new idbModules.IDBTransaction(req.source, [], idbModules.IDBTransaction.VERSION_CHANGE);
+                                        req.transaction.__addToTransactionQueue(function onupgradeneeded(tx, args, success) {
+                                            idbModules.util.callback("onupgradeneeded", req, e);
+                                            success();
+                                        });
+                                        req.transaction.__oncomplete = function() {
+                                            req.transaction = null;
+                                            var e = idbModules.util.createEvent("success");
+                                            idbModules.util.callback("onsuccess", req, e);
+                                        };
+                                    }, dbCreateError);
                                 }, dbCreateError);
-                            }, dbCreateError);
-                        } else {
-                            idbModules.util.callback("onsuccess", req, e);
-                        }
+                            } else {
+                                idbModules.util.callback("onsuccess", req, e);
+                            }
+                        }, dbCreateError);
                     }, dbCreateError);
                 }, dbCreateError);
-            }, dbCreateError);
+            });
         }
 
         createSysDB(function() {
@@ -257,4 +277,5 @@
 
     idbModules.shimIndexedDB = new IDBFactory();
     idbModules.IDBFactory = IDBFactory;
+    idbModules.getOpenDatabase = getOpenDatabase;
 }(idbModules));

@@ -2675,66 +2675,68 @@ var idbModules = {  // jshint ignore:line
         this.__running = true;
         var me = this;
 
-        me.db.__db.transaction(function executeRequests(tx) {
-                me.__tx = tx;
-                var q = null, i = 0;
+        idbModules.getOpenDatabase(me.db.name, me.db.version, null, function (db) {
+            db.transaction(function executeRequests(tx) {
+                    me.__tx = tx;
+                    var q = null, i = 0;
 
-                function success(result, req) {
-                    if (req) {
-                        q.req = req;// Need to do this in case of cursors
-                    }
-                    q.req.readyState = "done";
-                    q.req.result = result;
-                    delete q.req.error;
-                    var e = idbModules.util.createEvent("success");
-                    idbModules.util.callback("onsuccess", q.req, e);
-                    i++;
-                    executeNextRequest();
-                }
-
-                function error(tx, err) {
-                    err = idbModules.util.findError(arguments);
-                    try {
-                        // Fire an error event for the current IDBRequest
+                    function success(result, req) {
+                        if (req) {
+                            q.req = req;// Need to do this in case of cursors
+                        }
                         q.req.readyState = "done";
-                        q.req.error = err || "DOMError";
-                        q.req.result = undefined;
-                        var e = idbModules.util.createEvent("error", err);
-                        idbModules.util.callback("onerror", q.req, e);
+                        q.req.result = result;
+                        delete q.req.error;
+                        var e = idbModules.util.createEvent("success");
+                        idbModules.util.callback("onsuccess", q.req, e);
+                        i++;
+                        executeNextRequest();
                     }
-                    finally {
-                        // Fire an error event for the transaction
-                        transactionError(err);
-                    }
-                }
 
-                function executeNextRequest() {
-                    if (i >= me.__requests.length) {
-                        // All requests in the transaction are done
-                        me.__requests = [];
-                        if (me.__active) {
-                            me.__active = false;
-                            transactionFinished();
-                        }
-                    }
-                    else {
+                    function error(tx, err) {
+                        err = idbModules.util.findError(arguments);
                         try {
-                            q = me.__requests[i];
-                            q.op(tx, q.args, success, error);
+                            // Fire an error event for the current IDBRequest
+                            q.req.readyState = "done";
+                            q.req.error = err || "DOMError";
+                            q.req.result = undefined;
+                            var e = idbModules.util.createEvent("error", err);
+                            idbModules.util.callback("onerror", q.req, e);
                         }
-                        catch (e) {
-                            error(e);
+                        finally {
+                            // Fire an error event for the transaction
+                            transactionError(err);
                         }
                     }
+
+                    function executeNextRequest() {
+                        if (i >= me.__requests.length) {
+                            // All requests in the transaction are done
+                            me.__requests = [];
+                            if (me.__active) {
+                                me.__active = false;
+                                transactionFinished();
+                            }
+                        }
+                        else {
+                            try {
+                                q = me.__requests[i];
+                                q.op(tx, q.args, success, error);
+                            }
+                            catch (e) {
+                                error(e);
+                            }
+                        }
+                    }
+
+                    executeNextRequest();
+                },
+
+                function webSqlError(err) {
+                    transactionError(err);
                 }
-
-                executeNextRequest();
-            },
-
-            function webSqlError(err) {
-                transactionError(err);
-            }
-        );
+            );
+        });
 
         function transactionError(err) {
             idbModules.util.logError("Error", "An error occurred in a transaction", err);
@@ -3004,6 +3006,25 @@ var idbModules = {  // jshint ignore:line
 
     var DEFAULT_DB_SIZE = 4 * 1024 * 1024;
     var sysdb;
+    var ConnectionPool = {};
+
+    function getOpenDatabase(name, version, size, callback) {
+        size = size || DEFAULT_DB_SIZE;
+        var cacheKey = name + version;
+        var cachedDB = ConnectionPool[cacheKey];
+
+        if (!cachedDB) {
+            callback(ConnectionPool[cacheKey] = window.openDatabase(name, 1, name, size));
+        }
+        else {
+            // make sure connection is still open
+            cachedDB.transaction(function (tx) {
+                callback(cachedDB);
+            }, function () {
+                callback(ConnectionPool[cacheKey] = window.openDatabase(name, 1, name, size));
+            });
+        }        
+    }
 
     /**
      * Craetes the sysDB to keep track of version numbers for databases
@@ -3068,47 +3089,48 @@ var idbModules = {  // jshint ignore:line
         }
 
         function openDB(oldVersion) {
-            var db = window.openDatabase(name, 1, name, DEFAULT_DB_SIZE);
-            req.readyState = "done";
-            if (typeof version === "undefined") {
-                version = oldVersion || 1;
-            }
-            if (version <= 0 || oldVersion > version) {
-                var err = idbModules.util.createDOMError("VersionError", "An attempt was made to open a database using a lower version than the existing version.", version);
-                dbCreateError(err);
-                return;
-            }
+            getOpenDatabase(name, 1, DEFAULT_DB_SIZE, function (db) {
+                req.readyState = "done";
+                if (typeof version === "undefined") {
+                    version = oldVersion || 1;
+                }
+                if (version <= 0 || oldVersion > version) {
+                    var err = idbModules.util.createDOMError("VersionError", "An attempt was made to open a database using a lower version than the existing version.", version);
+                    dbCreateError(err);
+                    return;
+                }
 
-            db.transaction(function(tx) {
-                tx.executeSql("CREATE TABLE IF NOT EXISTS __sys__ (name VARCHAR(255), keyPath VARCHAR(255), autoInc BOOLEAN, indexList BLOB)", [], function() {
-                    tx.executeSql("SELECT * FROM __sys__", [], function(tx, data) {
-                        var e = idbModules.util.createEvent("success");
-                        req.source = req.result = new idbModules.IDBDatabase(db, name, version, data);
-                        if (oldVersion < version) {
-                            // DB Upgrade in progress
-                            sysdb.transaction(function(systx) {
-                                systx.executeSql("UPDATE dbVersions set version = ? where name = ?", [version, name], function() {
-                                    var e = idbModules.util.createEvent("upgradeneeded");
-                                    e.oldVersion = oldVersion;
-                                    e.newVersion = version;
-                                    req.transaction = req.result.__versionTransaction = new idbModules.IDBTransaction(req.source, [], idbModules.IDBTransaction.VERSION_CHANGE);
-                                    req.transaction.__addToTransactionQueue(function onupgradeneeded(tx, args, success) {
-                                        idbModules.util.callback("onupgradeneeded", req, e);
-                                        success();
-                                    });
-                                    req.transaction.__oncomplete = function() {
-                                        req.transaction = null;
-                                        var e = idbModules.util.createEvent("success");
-                                        idbModules.util.callback("onsuccess", req, e);
-                                    };
+                db.transaction(function(tx) {
+                    tx.executeSql("CREATE TABLE IF NOT EXISTS __sys__ (name VARCHAR(255), keyPath VARCHAR(255), autoInc BOOLEAN, indexList BLOB)", [], function() {
+                        tx.executeSql("SELECT * FROM __sys__", [], function(tx, data) {
+                            var e = idbModules.util.createEvent("success");
+                            req.source = req.result = new idbModules.IDBDatabase(db, name, version, data);
+                            if (oldVersion < version) {
+                                // DB Upgrade in progress
+                                sysdb.transaction(function(systx) {
+                                    systx.executeSql("UPDATE dbVersions set version = ? where name = ?", [version, name], function() {
+                                        var e = idbModules.util.createEvent("upgradeneeded");
+                                        e.oldVersion = oldVersion;
+                                        e.newVersion = version;
+                                        req.transaction = req.result.__versionTransaction = new idbModules.IDBTransaction(req.source, [], idbModules.IDBTransaction.VERSION_CHANGE);
+                                        req.transaction.__addToTransactionQueue(function onupgradeneeded(tx, args, success) {
+                                            idbModules.util.callback("onupgradeneeded", req, e);
+                                            success();
+                                        });
+                                        req.transaction.__oncomplete = function() {
+                                            req.transaction = null;
+                                            var e = idbModules.util.createEvent("success");
+                                            idbModules.util.callback("onsuccess", req, e);
+                                        };
+                                    }, dbCreateError);
                                 }, dbCreateError);
-                            }, dbCreateError);
-                        } else {
-                            idbModules.util.callback("onsuccess", req, e);
-                        }
+                            } else {
+                                idbModules.util.callback("onsuccess", req, e);
+                            }
+                        }, dbCreateError);
                     }, dbCreateError);
                 }, dbCreateError);
-            }, dbCreateError);
+            });
         }
 
         createSysDB(function() {
@@ -3258,6 +3280,7 @@ var idbModules = {  // jshint ignore:line
 
     idbModules.shimIndexedDB = new IDBFactory();
     idbModules.IDBFactory = IDBFactory;
+    idbModules.getOpenDatabase = getOpenDatabase;
 }(idbModules));
 
 (function(window, idbModules){

@@ -37,66 +37,68 @@
         this.__running = true;
         var me = this;
 
-        me.db.__db.transaction(function executeRequests(tx) {
-                me.__tx = tx;
-                var q = null, i = 0;
+        idbModules.getOpenDatabase(me.db.name, me.db.version, null, function (db) {
+            db.transaction(function executeRequests(tx) {
+                    me.__tx = tx;
+                    var q = null, i = 0;
 
-                function success(result, req) {
-                    if (req) {
-                        q.req = req;// Need to do this in case of cursors
-                    }
-                    q.req.readyState = "done";
-                    q.req.result = result;
-                    delete q.req.error;
-                    var e = idbModules.util.createEvent("success");
-                    idbModules.util.callback("onsuccess", q.req, e);
-                    i++;
-                    executeNextRequest();
-                }
-
-                function error(tx, err) {
-                    err = idbModules.util.findError(arguments);
-                    try {
-                        // Fire an error event for the current IDBRequest
+                    function success(result, req) {
+                        if (req) {
+                            q.req = req;// Need to do this in case of cursors
+                        }
                         q.req.readyState = "done";
-                        q.req.error = err || "DOMError";
-                        q.req.result = undefined;
-                        var e = idbModules.util.createEvent("error", err);
-                        idbModules.util.callback("onerror", q.req, e);
+                        q.req.result = result;
+                        delete q.req.error;
+                        var e = idbModules.util.createEvent("success");
+                        idbModules.util.callback("onsuccess", q.req, e);
+                        i++;
+                        executeNextRequest();
                     }
-                    finally {
-                        // Fire an error event for the transaction
-                        transactionError(err);
-                    }
-                }
 
-                function executeNextRequest() {
-                    if (i >= me.__requests.length) {
-                        // All requests in the transaction are done
-                        me.__requests = [];
-                        if (me.__active) {
-                            me.__active = false;
-                            transactionFinished();
-                        }
-                    }
-                    else {
+                    function error(tx, err) {
+                        err = idbModules.util.findError(arguments);
                         try {
-                            q = me.__requests[i];
-                            q.op(tx, q.args, success, error);
+                            // Fire an error event for the current IDBRequest
+                            q.req.readyState = "done";
+                            q.req.error = err || "DOMError";
+                            q.req.result = undefined;
+                            var e = idbModules.util.createEvent("error", err);
+                            idbModules.util.callback("onerror", q.req, e);
                         }
-                        catch (e) {
-                            error(e);
+                        finally {
+                            // Fire an error event for the transaction
+                            transactionError(err);
                         }
                     }
+
+                    function executeNextRequest() {
+                        if (i >= me.__requests.length) {
+                            // All requests in the transaction are done
+                            me.__requests = [];
+                            if (me.__active) {
+                                me.__active = false;
+                                transactionFinished();
+                            }
+                        }
+                        else {
+                            try {
+                                q = me.__requests[i];
+                                q.op(tx, q.args, success, error);
+                            }
+                            catch (e) {
+                                error(e);
+                            }
+                        }
+                    }
+
+                    executeNextRequest();
+                },
+
+                function webSqlError(err) {
+                    transactionError(err);
                 }
-
-                executeNextRequest();
-            },
-
-            function webSqlError(err) {
-                transactionError(err);
-            }
-        );
+            );
+        });
 
         function transactionError(err) {
             idbModules.util.logError("Error", "An error occurred in a transaction", err);
